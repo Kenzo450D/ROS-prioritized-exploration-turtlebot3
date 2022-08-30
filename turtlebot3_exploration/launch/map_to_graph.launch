@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- Set up the agent type -->
+    <!-- Alice: Priority based exploration agent -->
+    <!-- Bob: Cost based exploration agent -->
+    <arg name="agent_type" default="Alice"/>
+    <param name="agent_type" type="string" value="Alice" />
+
+    <!-- Unused parameter -->
+    <!-- <param name="record_dataset" type="boolean" value="true"/> -->
+
+    <!-- Execute the script to convert occupancy grid map to a graph -->
+    <!-- The graph has vertices with priority values specified for corridors, large rooms, and small rooms -->
+    <node pkg="turtlebot3_exploration" type="convert_eroded_map_to_graph_server.py" name="convert_eroded_map_to_graph_server" args="$(arg agent_type)" output="screen"/>
+  
+    <!-- Makes a plot on rviz showing the graph vertices and graph edges -->
+    <node pkg="turtlebot3_exploration" type="rviz_graph_curved_edges.py" name="rviz_graph_curved_edges" output="screen"/>
+  
+</launch> 

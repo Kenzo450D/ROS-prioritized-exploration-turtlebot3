@@ -1,0 +1,6 @@
+[submodule "navigation_msgs"]
+	path = navigation_msgs
+	url = https://github.com/ros-planning/navigation_msgs.git
+[submodule "geometry2"]
+	path = geometry2
+	url = https://github.com/ros/geometry2.git

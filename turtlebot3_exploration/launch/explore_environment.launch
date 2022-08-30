@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<launch>
+    
+    <param name="robot_moving" type="boolean" value="false" />
+
+    <node pkg="turtlebot3_exploration" type="exploration_time.py" name="exploration_time" output="screen"/>
+    
+    <node pkg="turtlebot3_exploration" type="exploration_agent.py" name="exploration_agent" output="screen" args="False"/>
+
+    <node pkg="turtlebot3_exploration" type="get_average_speed.py" name="get_average_speed" output="screen" />
+
+    <node pkg="turtlebot3_exploration" type="mark-odom.py" name="mark_odom" output="screen" />
+  
+</launch> 

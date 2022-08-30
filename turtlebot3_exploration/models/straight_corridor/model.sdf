@@ -1,0 +1,29 @@
+<?xml version="1.0" ?>
+<sdf version="1.5">
+  <model name='straight_corridor'>
+            <static>1</static>
+            <pose frame=''>0 0 0 0 0 0</pose>
+            <link name='walls'>
+                <collision name='collision'>
+                    <geometry>
+                        <mesh>
+                            <uri>model://straight_corridor/meshes/straight_corridor.dae</uri>
+                        </mesh>
+                    </geometry>
+                <max_contacts>10</max_contacts>
+                </collision>
+                <visual name='visual'>
+                    <geometry>
+                        <mesh>
+                            <uri>model://straight_corridor/meshes/straight_corridor.dae</uri>
+                        </mesh>
+                    </geometry>
+                <cast_shadows>0</cast_shadows>
+                </visual>
+                    <self_collide>0</self_collide>
+                    <enable_wind>0</enable_wind>
+                    <kinematic>0</kinematic>
+            </link>
+        </model>
+</sdf>
+ 
