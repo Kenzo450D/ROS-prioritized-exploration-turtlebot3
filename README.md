@@ -38,33 +38,17 @@ This runs the greedy version of the algorithms.
 |4         | `roslaunch turtlebot3_exploration map_to_graph.launch` |
 |5         | `roslaunch turtlebot3_exploration explore_environment.launch`|
 
-The exploration percentage shows up in the terminal executing the 'explore_environment.launch'.
+The exploration percentage shows up in the terminal executing the 'explore_environment.launch'. <br>
 **Note:** Sometimes, the exploration percentage may show up as greater than 100 percent. As the ground truth exploration might have traces of differently mapped regions (e.g., a wall mapped slightly thicker).
 
-## How the exploration algorithm works
+## Environment limitations
 
-### Dependencies
-
-1. Turtlebot slam package running a slam algorithm. Karto/Hector works better than gmapping. However, they require changed functions for `map_to_graph_coordinates` and `graph_to_map_coordinates`.
-2. Turtlebot world with turtlebot3 in it.
-3. The launch file for slam algorithm has a parameter to change the sensor scan distance. Does it work?
+1. The environment needs to be static with no dynamic obstacles. The motion planning algorithm is basic that follows point coordinates created in the map. 
+2. In case really large maps are used, the gmapping parameters should be updated to accomodate for a larger map.
+3. If changes are made in the SLAM algorithm, the functions of `_odom_to_map_coordinate` and `_map_to_odom_coordinate` should be updated based on the new SLAM algorithm. This is due to the fact that each SLAM algorithm considers the map center coordinate to be different.
 
 
-### ROS Nodes required to make
-
-1. Make a node to identify the priority of the nodes.
-2. Make a launch file that runs the required services.
-	1. Service 1: Makes the map into a graph
-	2. Service 2: Makes the graph into a weighted graph. (Requires the next service)
-	3. Service 3: Makes a small region to a weight value.
-
-
-## Problems and challenges
-
-1. Could not get turtlebot navigation to work without a static map of the entire world.
-
-
-### Package Dependencies and Common Errors without them
+## Package Dependencies and Common Errors without them
 
 1. CMake Error at `/opt/ros/noetic/share/catkin/cmake/test/gtest.cmake:180 (add_executable)`: <br>
   add_executable cannot create target "test_transform_datatypes" because another target with the same name already exists.  The existing target is an executable created in source directory "/home/sayantan/catkin_ws/src/geometry2/tf2".  See documentation for policy CMP0002 for more details. <br>
@@ -93,3 +77,14 @@ The exploration percentage shows up in the terminal executing the 'explore_envir
 
 5. `view_frames` does not work <br>
     (ros geometry bug)[https://github.com/ros/geometry/pull/193]
+    
+# Contributing
+
+## Contributing environments
+
+1. To contribute environments, please add the blender files to the `blender` directory and create a `.dae` file in the model directory. Based on the model, create a `.world` file. This `.world` file can be used in the launch file.
+2. In launch file, the number of cells for each type of building structure such as `corridors`, `large_room`, and `small_room` needs to be mentioned. This can be measured by creating a ground truth label and counting the number of cells in the completely explored map.
+
+## Contributing algorithms
+
+Start from `exploration_agent.py` file.
