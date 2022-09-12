@@ -1,0 +1,3 @@
+small_room 1
+large_room 10
+corridor 100

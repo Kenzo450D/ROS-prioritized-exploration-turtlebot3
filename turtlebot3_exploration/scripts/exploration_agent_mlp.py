@@ -29,13 +29,14 @@ from bresenham_line import check_obstacles
 from get_exploration_metrics import ExplorationMetrics
 from helper_functions import *
 from helper_functions import _get_cost_to_all_vertices
+from mlp_solver import MLPSolver
 
 # ---- ROS services
 from turtlebot3_exploration.srv import ConvertMapGraph
 
 
 class PriorityExplorationAgent:
-    def __init__(self, exploration_time_topic, occ_map_topic, avg_speed_topic, turn360Flag=True):
+    def __init__(self, exploration_time_topic, occ_map_topic, avg_speed_topic, mlp_prize_file, turn360Flag=True):
         # ---- Input variables ----
         #   exploration_time_topic: Topic on which the whistle is published.
         # -------------------------
@@ -47,12 +48,13 @@ class PriorityExplorationAgent:
         # the rostopic in file whistle_time publishes the time remaining.
         # if the topic gets a inf value, then the time limit is unknown, else 
         # it is known
-        self._initialize_parameters(exploration_time_topic, occ_map_topic, avg_speed_topic)
+        self._initialize_parameters(exploration_time_topic, occ_map_topic, avg_speed_topic, mlp_prize_file)
 
         print("Parameters initialized!")
 
         # -- turn robot 360 degrees at position to get a complete scan
-        if turn360Flag == True:
+        if turn360Flag:
+            print ("Robot will turn 360 degrees!")
             drad = DriveRobotAngleDirection(2 * math.pi, 0.1, 0.02)
 
         if not rospy.has_param('flag_publish_nodes_rviz'):
@@ -61,7 +63,7 @@ class PriorityExplorationAgent:
         rospy.set_param('robot_moving', False)  # set that the robot is not moving
 
         self.agent_type = rospy.get_param('agent_type')  # get the agent type from ros parameter
-        # possible agent types are: Alice, Bob
+        # possible agent types are: Alice, Bob, MLP
         # TODO: is this even necessary, just follow the priority values greedily?
 
         # -- set up flags for exploration or moving robot
@@ -80,7 +82,7 @@ class PriorityExplorationAgent:
     # --------------------------------------------------------------------------
     # -- Function: intiialize subscribers and time parameters
     # --------------------------------------------------------------------------
-    def _initialize_parameters(self, exploration_time_topic, occ_map_topic, avg_speed_topic):
+    def _initialize_parameters(self, exploration_time_topic, occ_map_topic, avg_speed_topic, mlp_prize_file):
         # -- set the time limits
         # use a subscriber to get the current time limit
         # the rostopic in file whistle_time publishes the time remaining.
@@ -120,6 +122,19 @@ class PriorityExplorationAgent:
         print(f"init coordinate: {np.round(self.init_coordinate, 2)}")
         print(f"Init map coordinate: {self.init_map_coordinate}")
         print("#" * 150)
+        
+        # -- initialize mlp prize file
+        self.mlp_node_priority = {}
+        with open(mlp_prize_file) as fp:
+            while True:
+                line = fp.readline()
+                line = line.strip()
+                if not line:
+                    break
+                # -- split line
+                elems = line.split()
+                node_type = elems[0]
+                self.mlp_node_priority[node_type] = float(elems[1])
 
     # --------------------------------------------------------------------------
     # -- Prioritized Exploration agent
@@ -530,112 +545,245 @@ class PriorityExplorationAgent:
         # -- get the occupancy grid graph
         occ_graph = self.occ_graph
 
-        # -- get goal positions
-        # Returns: return occ_graph_dict, lowest_cost_action, source_all_nodes, min_dist_idx
-        occ_graph_dict, p_node_list, source_all_nodes, source_idx = self._get_goal_positions(occ_graph, False)
-        print("Returned from get goal positions!")
-        # p_node_list: Priority node list
-        """
-        Example output of print is here: https://pastebin.com/raw/1nEnKNu5
-        """
-
-        # -- print
-        if debug_print == True:
-            # if True:
-            print("#" * 100)
-            print("get_goal_path:: Prioritized Node List: ")
-            for item in p_node_list:
-                print("-" * 50)
-                print(item)
-            print("-" * 100)
-            print("get_goal_path:: Source of all nodes:")
-            print(source_all_nodes)
-        print("-" * 100)
-
-        # -- if p_node_list is empty
-        if len(p_node_list) == 0:
+        # -- get target vertex
+        occ_graph_dict, target_node, source_all_nodes, source_idx = self._get_goal_positions_MLP(occ_graph, True)
+        print ("MLP Algorithm: Target Node: ", target_node)
+        if (target_node == None):
             gpc = []
             return gpc
-        # then we do not have any exploration to complete. 
+        # input("continue to create rev_path?")
 
-        # -- Get a path from source_idx to p_node_list using source_all_nodes
-        if debug_print:
-            print("get_goal_path:: Get a path from source node to best choice node")
-        target_idx = 0
-        while True:
-            # if parent of target_idx node is the same node (i.e.) no parents
-            # change the index as target_idx node is probably a disjoined graph
-            init_target_node_id = p_node_list[target_idx][-1].val.id
-            rev_path = [init_target_node_id]
-            # set current node
-            cur_node = init_target_node_id
-            # Loop through nodes till current node is source
-            while cur_node != source_idx:
-                # -- get source of target node
-                source_cur_node = source_all_nodes[cur_node]
-                if source_cur_node == cur_node:
-                    break
-                # -- add source_cur_node to rev_path
-                rev_path.append(source_cur_node)
-                # -- change the current node
-                cur_node = source_cur_node
-            if cur_node == source_idx:
-                # print "Path discovered!"
+        # -- get the path from the current position to the target vertex
+        rev_path = self._create_path_MLP_algorithm(target_node,source_all_nodes, source_idx, occ_graph_dict)
+        
+        return self._convert_graph_path_to_coordinate_path(rev_path, occ_graph, occ_graph_dict)
+
+    def _get_goal_positions_MLP(self, occ_graph, debug_print=True):
+        # -- get the nodes from the graph
+        occ_graph_vertices = occ_graph.g.nodes
+        # -- get the current robot position
+        min_dist, current_vertex_idx = self._find_closest_vertex(occ_graph)
+        # If the robot is at the same position as any frontier node, then make the node non-frontier. (Priority = 0)
+        if min_dist < 3:
+            # -- robot is at node that is a frontier node
+            current_vertex_coord = occ_graph_vertices[current_vertex_idx].o
+            dist_prev_pose = self._get_euclidean_dist(current_vertex_coord, self.prev_map_pose)
+            if occ_graph_vertices[current_vertex_idx].priority > 0 and dist_prev_pose < 3:
+                # -- robot was here last iteration
+                # the robot is stuck at this position after an
+                # entire iteration.
+                print("Robot is stuck at current location")
+                print("Forcing current node to be non-priority node")
+                occ_graph.g.nodes[current_vertex_idx].priority = 0
+                # -- add this location as an exception location
+                """ Exception locations are locations that should be marked as 
+                non frontier locations. This would force the robot to explore 
+                """
+                self.exception_locations.append((current_vertex_coord, rospy.get_time()))
+
+        # -- handle exception priority
+        occ_graph = self._handle_exception_vertices(occ_graph)
+
+        # -- get closest vertex
+        current_vertex = self._get_starting_vertex(occ_graph, self.cur_map_pose, False)
+        print(f"Closest vertex: {current_vertex}")
+
+        # -- convert the occ_graph to a dictionary
+        occ_graph_dict = self._get_graph_as_dictionary(occ_graph)
+
+        # -- get home vertex
+        home_vertex = self.get_home_vertex(occ_graph)
+
+        # -- print the graph
+        self.print_occ_graph_dict(occ_graph_dict)
+        print ("-"*100)
+
+        # -- generate the source_all_nodes
+        dist_all_nodes_cur, source_all_nodes_cur = _get_cost_to_all_vertices(
+            occ_graph_vertices[current_vertex_idx],
+            occ_graph_dict,
+            False)  # debug print = False
+        dist_all_nodes_cur = dict(dist_all_nodes_cur) #remove defaultdict
+
+        print(f"_get_goal_positions_MLP: Type of dist_all_nodes: {type(dist_all_nodes_cur)}")
+        print(f"_get_goal_positions_MLP: distance_all_nodes: {dist_all_nodes_cur}")
+        print(f"_get_goal_positions_MLP: Average speed: {self.avg_speed}")
+        # -- convert dist_all_nodes to time estimate to all nodes
+        for item, val in dist_all_nodes_cur.items():
+            dist_all_nodes_cur[item] = val *  self.resolution / self.avg_speed
+        
+        print(f"_get_goal_positions_MLP: distance_all_nodes_time: {dist_all_nodes_cur}")
+        # input("_get_goal_positions_MLP: Continue?")
+
+        # -- initialize the MLP solver
+        mlp = MLPSolver(occ_graph_dict, self.time_remaining, self.mlp_node_priority, current_vertex,
+                          home_vertex, dist_all_nodes_cur, self.resolution, self.avg_speed)
+
+        print ("Initialized MLP Solver")
+
+        target_cost, target_vertex = mlp.get_action()
+
+        # return the priority_queue and the source to all nodes dictionary
+        return occ_graph_dict, target_vertex, source_all_nodes_cur, current_vertex_idx
+
+    def _get_starting_vertex(self, occ_graph, cur_map_pose, debug_print=False):
+        """ Calculates closest vertex based on the current robot position
+        """
+        # -- Find closest vertex to robot position
+        closest_edge_point, min_dist_edge_point, min_dist_source, min_dist_target, edge_idx = self._find_closest_point_in_graph(occ_graph, cur_map_pose)
+        self.closest_edge_point = closest_edge_point
+        self.min_dist_edge_point = min_dist_edge_point
+        self.min_dist_source = min_dist_source
+        self.min_dist_target = min_dist_target
+        self.edge_idx = edge_idx
+
+        # -- closest node based on the number of pts to either vertex
+        edge_pts = np.array(occ_graph.g.links[edge_idx].pts)
+        n_edge_pts = occ_graph.g.links[edge_idx].nPoints
+        edge_pts = edge_pts.reshape(n_edge_pts, 2)
+        flag_starting_vertex_is_closest = True
+        for idx, edge_point in enumerate(edge_pts):
+            # -- check if it is equal to closest edge point
+            if np.array_equal(closest_edge_point, edge_point):
+                if idx < n_edge_pts / 2:
+                    flag_starting_vertex_is_closest = True
+                else:
+                    flag_starting_vertex_is_closest = False
                 break
-            else:
-                target_idx += 1
-        rev_path.reverse()
+        if flag_starting_vertex_is_closest:
+            min_dist_idx = min_dist_source
+        else:
+            min_dist_idx = min_dist_target
+
+        print("_get_goal_positions: Min Dist Idx Closest Vertex through closest edge point: ", min_dist_idx)
+        if debug_print:
+            print("#" * 100)
+            print("Function: _get_goal_positions")
+            print("-" * 100)
+            print("Closest vertex to robot Position: ", min_dist_idx)
+            print("-" * 100)
+
+        return min_dist_idx
+
+    def get_home_vertex(self, occ_graph):
+        """ Get the vertex id of the home vertex """
+        # initial coordinate is the home coordinate
+        # -- Get closest vertex to home location
+        print("Calculating distance to home: closest point to home node")
+        closest_edge_point, min_dist_edge_point, min_dist_source, min_dist_target, edge_idx = self._find_closest_point_in_graph(
+            occ_graph, self.init_map_coordinate)
+
+        # -- closest node based on the number of points to either vertex
+        edge_pts = np.array(occ_graph.g.links[edge_idx].pts)
+        n_edge_pts = occ_graph.g.links[edge_idx].nPoints
+        edge_pts = edge_pts.reshape(n_edge_pts, 2)
+        startingClosest = True
+        for idx, edge_point in enumerate(edge_pts):
+            # -- check if it is equal to closest edge point
+            if np.array_equal(closest_edge_point, edge_point):
+                if idx < n_edge_pts / 2:
+                    startingClosest = True
+                else:
+                    startingClosest = False
+                break
+        if startingClosest:
+            min_dist_idx = min_dist_source
+        else:
+            min_dist_idx = min_dist_target
+        self.home_closest_edge_point = closest_edge_point
+        self.home_min_dist_edge_point = min_dist_edge_point
+        self.home_min_dist_source = min_dist_source
+        self.home_min_dist_target = min_dist_target
+        self.home_min_dist_idx = min_dist_idx
+        self.home_edge_idx = edge_idx
+
+        # -- return the home vertex
+        return min_dist_idx
+
+    def _create_path_MLP_algorithm(self, target_idx, source_all_nodes, cur_node_idx, occ_graph_dict,  debug_print=True):
+        """ Creates a path from the current robot position to a feasible target location.
+        Adds the nodes in the list of exception_vertices so that other frontier points
+        are not formed in those locations.
+        Input:
+            target_idx: Target node
+            cur_node_idx: current node
+        Output:
+            rev_path: List of node ids
+        """
+        rev_path = [target_idx]
+        temp_target = target_idx
+        while cur_node_idx != temp_target:
+            # -- get the source of target node
+            source_target_node = source_all_nodes[temp_target]
+            # -- append the source to target vertex
+            rev_path.append(source_target_node)
+            # -- change target node
+            temp_target = source_target_node
+
+        rev_path.reverse() # Reverse the path
 
         # -- debug print
         print("Robot position: ", np.round([self.current_pose.position.x, self.current_pose.position.y], 2))
         print("Path (fixed): {}".format(rev_path))
+        print("Current node: {}".format(cur_node_idx))
         print("Path with Odometry coordinates: ")
         for v in rev_path:
             map_coord = occ_graph_dict[v][0].o
             # print "Goal Path to coordinates: Map Coord: ", map_coord
             odom_coord = self._map_to_odom_coordinate(map_coord)
             print("Node: {}\tCoordinate: {}".format(v, odom_coord))
-
+        
         # -- add the node locations to the exception locations so that nodes get de-prioritized next time
         self.add_nodes_exception_vertices(rev_path, occ_graph_dict)
+        return rev_path
 
-        # -- first mile travel to nearest node
-        # closest_edge_point, min_dist_edge_point, min_dist_source, min_dist_target, edge_idx = self._find_closest_point_in_graph(occ_graph, self.cur_map_pose)
+    def _convert_graph_path_to_coordinate_path(self, rev_path, occ_graph, occ_graph_dict, debug_print=True):
+        """ Converts graph vertex path to coordinate path.
+        Input:
+        1. Vertex path
+        3. debug_print
+
+        Steps:
+        1. Calculate gpc_init: to get the closest point on an edge from the current robot position
+        """
         closest_edge_point = self.closest_edge_point
         min_dist_edge_point = self.min_dist_edge_point
         min_dist_source = self.min_dist_source
         min_dist_target = self.min_dist_target
         edge_idx = self.edge_idx
 
-        # print "=*"*50
-        # print "Min Dist Idx Closest Vertex: ", min_dist_idx
-        # print "get_goal_path :: Min Dist Idx from any edge:", closest_edge_point
-        # print "get_goal_path :: Min Dist Idx Edge Source: ", min_dist_source
-        # print "get_goal_path :: Min Dist Idx Edge Target: ", min_dist_target
-        # print "=*"*50
+        print ("=*"*50)
+        # print ("Min Dist Idx Closest Vertex: ", min_dist_idx)
+        print("get_goal_path :: Min Dist Idx from any edge:", closest_edge_point)
+        print("get_goal_path :: Min Dist Idx Edge Source: ", min_dist_source)
+        print("get_goal_path :: Min Dist Idx Edge Target: ", min_dist_target)
+        print("get_goal_path :: Rev path: ", rev_path)
+        print ("=*"*50)
+        # input("Function: _convert_graph_path_to_coordinate_path:: Press any key to continue...")
         # -- check if the first or second node is the closest node from the robot
-        # print "get_goal_path :: Current robot position", np.round(self.current_pose.position.x,2), "\t", np.round(self.current_pose.position.y,2)
-        gpc_init = np.array([])
+        print("get_goal_path :: Current robot position", np.round(self.current_pose.position.x,2), "\t", np.round(self.current_pose.position.y,2))
+        gpc_init = np.array([[]])
         if len(rev_path) > 1 and min_dist_source == rev_path[1]:
-            # print "get_goal_path :: min_dist_source is the second node"
+            print ("get_goal_path :: min_dist_source is the second node")
             # -- get the edge from the closest_edge_point all the way to the source
             gpc_init = self._get_cells_through_edge(closest_edge_point, True, occ_graph.g.links[edge_idx])
             del (rev_path[0])
         elif len(rev_path) > 1 and min_dist_target == rev_path[1]:
-            # print "get_goal_path :: min_dist_target is the second node"
+            print ("get_goal_path :: min_dist_target is the second node")
             gpc_init = self._get_cells_through_edge(closest_edge_point, False, occ_graph.g.links[edge_idx])
             del (rev_path[0])
         elif min_dist_source == rev_path[0]:
-            # print "get_goal_path :: min_dist_source is the first node"
+            print ("get_goal_path :: min_dist_source is the first node")
             gpc_init = self._get_cells_through_edge(closest_edge_point, True, occ_graph.g.links[edge_idx])
         elif min_dist_target == rev_path[0]:
-            # print "get_goal_path :: min_dist_target is the first node"
+            print ("get_goal_path :: min_dist_target is the first node")
             gpc_init = self._get_cells_through_edge(closest_edge_point, False, occ_graph.g.links[edge_idx])
         # -- print gpc init
         if debug_print:
             print("get_goal_path:: GPC init: ")
             print(np.round(gpc_init, 2))
 
+        # input("Press any key to continue...")
         if debug_print:
             print("rev_path: ", rev_path)
             print("get_goal_path:: Calling Goal path to coordinates with edges")
@@ -658,12 +806,15 @@ class PriorityExplorationAgent:
         # -- merge gpc init and gpc to create the final goal path
         if debug_print:
             print("GPC size: ", gpc.shape)
+            # print ("GPC init size: ", gpc_init.shape)
         gpc = np.vstack((gpc_init, gpc))
         if debug_print:
             print("GPC size (after gpc_init): ", gpc.shape)
+            # input("Press any key to continue...")
         # -- convert gpc to list
         gpc = gpc.tolist()
         return gpc
+
 
     def _get_cells_through_edge(self, start_cell, source_flag, edge, sparse=5, debug_print=False):
         ''' Get edge pts from a certain point to the end of the edge_pts array
@@ -711,6 +862,170 @@ class PriorityExplorationAgent:
             odom_coord = self._map_to_odom_coordinate(v)
             coordinates.append(odom_coord)
         return coordinates
+
+    # --------------------------------------------------------------------------
+    # Function: _get_cost_to_all_vertices
+    # --------------------------------------------------------------------------
+    def _get_cost_to_all_vertices(self,
+                                  source_node,
+                                  occ_graph_dict,
+                                  debug_print=True):
+        """ https://en.wikipedia.org/wiki/Dijkstra%27s_algorithm#Algorithm
+        """
+
+        if debug_print:
+            print("#" * 100)
+            print("Function: _get_cost_to_all_vertices")
+            print("Source node: ", source_node)
+            print("-" * 100)
+
+        # Step 1: initialize variables
+        last_node = None
+        cur_node = copy.deepcopy(source_node)
+        cost_to_cur_node = 0
+        lowest_distance_priority_queue = []
+        visited_nodes = []
+        visited_nodes.append(cur_node.id)
+        unvisited_nodes = []  # to store unvisited nodes
+        for v_idx, v in occ_graph_dict.items():  # populate unvisited nodes
+            if v_idx != cur_node.id:
+                unvisited_nodes.append(v_idx)
+
+        # Step 2: initialize dictionaries
+        min_dist_to_v = defaultdict(lambda: np.inf)
+        source_of_v = defaultdict(lambda: source_node.id)
+        source_of_v[source_node.id] = source_of_v[source_node.id]
+        min_dist_to_v[source_node.id] = 0.0
+
+        print("_get_cost_to_all_vertices:: Before the while loop")
+        print("Source Node: ", source_node)
+
+        # Step 3: loop through nodes to get distance to all nodes
+        while True:
+            if debug_print:
+                print("=" * 100)
+                print("\t Back to the start of the loop")
+            # occ_graph_dict[cur_node.id][0]: Vertex / Node Object
+            # occ_graph_dict[cur_node.id][1]: Edges incident (list of Edge objects)
+            edges_incident = occ_graph_dict[cur_node.id][1]
+            # edges have no particular order in source and target idx. Any 
+            # of them could be the particular current node.
+            # print "Current Node: ", cur_node.id
+            # print "-"*50
+            # print "Edges Incident: "#, edges_incident
+
+            for edge in edges_incident:
+                # if debug_print: # BEGIN print
+                #     print "-"*50
+                #     print "Edge:"
+                #     print edge
+                #     print "Type of Edge: ",
+                #     print type(edge)
+                #     print "Checking if edge.source: ", edge.source, " is equal to cur_node.id: ", cur_node.id
+                #     print "Checking if edge.target: ", edge.target, " is equal to cur_node.id: ", cur_node.id
+                #     print "-*"*50
+                # END print
+                if edge.source == cur_node.id:
+                    nodeIdx = edge.target
+                elif edge.target == cur_node.id:
+                    nodeIdx = edge.source
+                node_cost = edge.weight
+
+                # -- Get the distance to the node
+                dist_to_node = node_cost + cost_to_cur_node
+
+                if debug_print:
+                    print("Node Index: ", nodeIdx)
+                    print("Node cost: ", node_cost)
+                    print("Distance to node: ", dist_to_node)
+                    print("-" * 50)
+
+                # -- compare if distance is lower than minimum recorded dist
+                if dist_to_node < min_dist_to_v[nodeIdx]:
+                    min_dist_to_v[nodeIdx] = dist_to_node
+                    source_of_v[nodeIdx] = cur_node.id
+                    # -- add to queue
+                    heapq.heappush(lowest_distance_priority_queue, (dist_to_node, nodeIdx))
+
+                if debug_print:
+                    print("-" * 50)
+
+            # -- EXIT condition: get the lowest cost node
+            if len(lowest_distance_priority_queue) == 0:
+                break
+            last_node = cur_node
+
+            # -- get cur_node_idx as node idx
+            upcoming_node = heapq.heappop(lowest_distance_priority_queue)
+            cur_node_idx = upcoming_node[1]
+            cost_to_cur_node = upcoming_node[0]
+
+            # -- get cur_node as node
+            cur_node = occ_graph_dict[cur_node_idx][0]
+
+            # -- add node to visited nodes
+            if cur_node_idx not in visited_nodes:
+                visited_nodes.append(cur_node_idx)
+
+        # -- convert default dictionary to dictionary
+        # min_dist_to_v = dict(min_dist_to_v)
+        source_of_v = dict(source_of_v)
+
+        # BEGIN debug print
+        if debug_print:
+            # print ("EXPLORATION AGENT: _get_cost_to_all_vertices:: All remote nodes visited!")
+            print("#" * 100)
+            print("_get_cost_to_all_vertices:: Minimum distances are: ")
+            for key, val in dict(min_dist_to_v).items():
+                print(key, val)
+            print("#" * 100)
+            print("_get_cost_to_all_vertices:: Sources of vertices are: ")
+            for key, val in dict(source_of_v).items():
+                print("\tNode: ", key, "Source: ", val)
+            print("#" * 100)
+            print("_get_cost_to_all_vertices:: Return back to control")
+            print("=" * 100)
+        # END debug print
+
+        # stop code here
+        # sys.exit(0)
+        print("_get_cost_to_all_vertices:: End of function")
+        # -- return
+        return min_dist_to_v, source_of_v
+
+
+    # -------------------------------------------------------------------------
+    # Function: print_occ_graph_dict
+    # -------------------------------------------------------------------------
+    def print_occ_graph_dict(self, occ_graph_dict):
+        """ Prints the occupancy graph on terminal
+        """
+        print("-" * 100)
+        print("Function: Print Occuapcny Graph Dictionary:")
+        print("Vertices:")
+        for key, item in occ_graph_dict.items():
+            print("=" * 80)
+            print("Node ID: ", key)
+            print("-" * 50)
+            print("Node info: ")
+            print(item[0])
+            print("-" * 50)
+            print("Edges incident: ")
+            edges_to = []
+            for edge in item[1]:
+                e_s = edge.source
+                e_t = edge.target
+                # edge_to = np.inf
+                if e_s == key:
+                    edges_to.append((e_t, edge.weight))
+                else:
+                    edges_to.append((e_s, edge.weight))
+            for e in edges_to:
+                print(f"({e[0]:.2f}, {e[1]:.2f})")
+            print("-" * 50)
+        print("=" * 100 + "\n" + "=" * 100 + "\n" + "=" * 100)
+        return
+
 
     # --------------------------------------------------------------------------
     # Function: Get odom coordinates from vertex indices
@@ -856,184 +1171,6 @@ class PriorityExplorationAgent:
 
         self.exception_locations = reduce_priority_locations
         return occ_graph
-
-    # --------------------------------------------------------------------------
-    # Function: _get_goal_positions
-    # --------------------------------------------------------------------------
-    def _get_goal_positions(self, occ_graph, debug_print=True):
-        """ Gets the next position for the robot to visit. 
-        Input:
-            occ_graph
-        Return:
-        1.  occ_graph_dict: A dictionary of the graph.
-        2.  lowest_cost_action: Prioritized list of frontier points
-            Format: List l1
-            l1 element: Tuple t1
-            t1 element: [0]: Priority of node
-                        [1]: Cost to visit that node
-                        [2]: Node parameters (node object)
-        3.  source_all_nodes
-        4.  min_dist_idx: closest vertex to the current node
-            
-        The output is a list of points(tuples) the robot needs to visit to
-        reach the overall goal position.
-            
-        
-        The output is based on the occupancy grid coordinate of the robot.
-        Tasks:
-            1. Get the current position of the robot.
-            2. Find out the closest vertex to the robot that vertex is the first
-               goal point of the robot.
-            3. Followed by which, find using dijstras' algorithm, the distance 
-               to all the remaining vertices in the graph.
-            4. Choose the vertex with the highest priority and lowest distance.
-        """
-
-        # -- get the nodes from the graph
-        occ_graph_vertices = occ_graph.g.nodes
-
-        # -- get the current robot position
-        """
-        If the robot is at the same position as any frontier node, then make 
-        the node non-frontier. (Priority = 0)
-        """
-        min_dist, min_dist_idx = self._find_closest_vertex(occ_graph)
-        if min_dist < 3:
-            # -- robot is at node that is a frontier node
-            min_vertex_coord = occ_graph_vertices[min_dist_idx].o
-            dist_prev_pose = self._get_euclidean_dist(min_vertex_coord, self.prev_map_pose)
-            if occ_graph_vertices[min_dist_idx].priority > 0 and dist_prev_pose < 3:
-                # -- robot was here last iteration
-                # the robot is stuck at this position after an 
-                # entire iteration. 
-                print("Robot is stuck at current location")
-                print("Forcing current node to be non-priority node")
-                occ_graph.g.nodes[min_dist_idx].priority = 0
-                # -- add this location as an exception location
-                """ Exception locations are locations that should be marked as 
-                non frontier locations. This would force the robot to explore 
-                """
-                self.exception_locations.append((min_vertex_coord, rospy.get_time()))
-
-        # -- handle exception priority
-        occ_graph = self._handle_exception_vertices(occ_graph)
-
-        # -- Find closest vertex to robot position
-        # TODO Replace this function
-        min_dist, min_dist_idx = self._find_closest_vertex(occ_graph)
-        print("_get_goal_positions: Min Dist Idx Closest Vertex through vertex search: ", min_dist_idx)
-        closest_edge_point, min_dist_edge_point, min_dist_source, min_dist_target, edge_idx = self._find_closest_point_in_graph(
-            occ_graph, self.cur_map_pose)
-        self.closest_edge_point = closest_edge_point
-        self.min_dist_edge_point = min_dist_edge_point
-        self.min_dist_source = min_dist_source
-        self.min_dist_target = min_dist_target
-        self.edge_idx = edge_idx
-        # -- closest node based on the number of pts to either vertex
-        edge_pts = np.array(occ_graph.g.links[edge_idx].pts)
-        n_edge_pts = occ_graph.g.links[edge_idx].nPoints
-        edge_pts = edge_pts.reshape(n_edge_pts, 2)
-        startingClosest = True
-        for idx, edge_point in enumerate(edge_pts):
-            # -- check if it is equal to closest edge point
-            if np.array_equal(closest_edge_point, edge_point):
-                if idx < n_edge_pts / 2:
-                    startingClosest = True
-                else:
-                    startingClosest = False
-                break
-        if startingClosest:
-            min_dist_idx = min_dist_source
-        else:
-            min_dist_idx = min_dist_target
-
-        print("_get_goal_positions: Min Dist Idx Closest Vertex through closest edge point: ", min_dist_idx)
-        if debug_print:
-            print("#" * 100)
-            print("Function: _get_goal_positions")
-            print("-" * 100)
-            print("Closest vertex to robot Position: ", min_dist_idx)
-            print("-" * 100)
-
-        # -- print the graph
-        # print_occ_graph(occ_graph)
-
-        # -- convert the occ_graph to a dictionary
-        # -- convert graph to dictionary
-        occ_graph_dict = self._get_graph_as_dictionary(occ_graph)
-
-        # -- Use dijkstra's algorithm to get vertices in priority
-        # dist_all_nodes is a dictionary
-        #   key: node_idx
-        #   val: float
-        # source_all_nodes is a dictionary
-        #   key: node_idx
-        #   val: node_idx
-        # source_all_nodes is a dictionary
-        dist_all_nodes, source_all_nodes = _get_cost_to_all_vertices(
-            occ_graph_vertices[min_dist_idx],
-            occ_graph_dict,
-            False)  # debug print = False
-
-        if True:
-            print("-" * 100)
-            print("_get_goal_positions: distance_all_nodes: ")
-            print(dist_all_nodes)
-            print("-" * 100)
-
-        # -- get the list of frontier vertices
-        frontier_vertices = self._get_frontier_vertices(occ_graph.g.nodes)
-        if debug_print:
-            print("Frontier Vertices: ", frontier_vertices)
-
-        # -- delete non frontier nodes
-        distance_frontier_nodes = self.del_non_frontier_nodes(frontier_vertices,
-                                                              dist_all_nodes)
-
-        # -- calculate distance to home if time is not infinity
-        if self.time_remaining != np.inf:
-            # -- Get the cost to home.
-            # cost_home is a dictionary, id = vertex_id and value is distance (in map coordinates)
-            home_node_idx, cost_home, source_nodes_home = self.distance_to_home(occ_graph, occ_graph_dict)
-            print("_get_goal_positions: calculated cost home.")
-            # above function returned return min_dist_idx, cost_home, source_all_nodes_home
-            # print "Cost to home: "
-            # print cost_home
-            # print "End: Cost to home"
-            self.home_node_idx = home_node_idx
-            self.return_home_cost = cost_home
-            self.source_nodes_home = source_nodes_home
-
-        if debug_print:
-            print("-" * 100)
-            print("_get_goal_positions: distance_frontier_nodes: ")
-            print(distance_frontier_nodes)
-            print("-" * 100)
-
-        # -- Arrange the frontier nodes with priority
-        # -- if the time limit is known, calculate the priority queue with time
-        # -- print the time remaining
-        print("Time remaining: ", self.time_remaining)
-        # Arrange the nodes based on priority and distance. Priority first, 
-        # distance second. Make a wrapper class if required
-        lowest_cost_action = []
-        print("Before function add nodes to priority queue")
-        self._add_nodes_priority_queue(distance_frontier_nodes,
-                                       occ_graph,
-                                       occ_graph_dict,
-                                       lowest_cost_action,
-                                       False)  # debug print
-
-        print("_get_goal_positions: Added nodes to priority Queue")
-
-        # -- print the goal point
-        print("-*" * 50)
-        if True:
-            print("Lowest cost goal point: {}".format(lowest_cost_action))
-            print("-*" * 50)
-
-        # return the goal point heap and the source to all nodes dictionary
-        return occ_graph_dict, lowest_cost_action, source_all_nodes, min_dist_idx
 
     def distance_to_home(self, occ_graph, occ_graph_dict):
         """ Function: distance_to_home
@@ -1446,6 +1583,19 @@ class PriorityExplorationAgent:
 
         return map_coord_row, map_coord_col
 
+def usage():
+    usage_str = """
+    USAGE:
+        rosrun turtlebot3_exploration exploration_agent.py <360Turn>
+        <360Turn>: Boolean: True/False
+    ------------------------------------------------------------
+    This code requires ROS param \'mlp_prize_file\': param should be a accessible filename for the MLP prizes
+    ------------------------------------------------------------
+    Example:
+        rosrun turtlebot3_exploration exploration_agent_mlp.py False 
+    """
+    print(usage_str)
+
 if __name__ == "__main__":
     ''' The parameters input are:
     1. Turn_360_at_start: Robot turns 360 degrees at the start of the exploration
@@ -1456,13 +1606,25 @@ if __name__ == "__main__":
     '''
     if len(sys.argv) > 1:
         if sys.argv[1] == "False":
+            turn_360 = False
             print("Priority exploration without 360 turn")
-            pea = PriorityExplorationAgent('/time_current',
-                                           '/map',
-                                           '/average_speed', False)
         else:
+            turn_360 = True
             print("Priority exploration with 360 turn")
-            pea = PriorityExplorationAgent('/time_current', '/map', '/average_speed', True)
+            
+        if rospy.has_param('mlp_prize_file'):
+            print ("Prize file parameter found")
+            prize_file = rospy.get_param("mlp_prize_file")
+            print ("Got the prize file: ", prize_file)
+        else:
+            print ("Prize file not setup. Please set parameter \'mlp_prize_file\'")
+            raise(ValueError)
+        
+        pea = PriorityExplorationAgent('/time_current',
+                                        '/map',
+                                        '/average_speed',
+                                        prize_file,
+                                        turn_360)
     else:
-        print("Priority exploration with 360 turn")
-        pea = PriorityExplorationAgent('/time_current', '/map', '/average_speed', True)
+        usage()
+        
