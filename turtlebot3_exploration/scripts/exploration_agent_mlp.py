@@ -548,7 +548,7 @@ class PriorityExplorationAgent:
         # -- get target vertex
         occ_graph_dict, target_node, source_all_nodes, source_idx = self._get_goal_positions_MLP(occ_graph, True)
         print ("MLP Algorithm: Target Node: ", target_node)
-        if (target_node == None):
+        if target_node == None:
             gpc = []
             return gpc
         # input("continue to create rev_path?")
@@ -595,8 +595,8 @@ class PriorityExplorationAgent:
         home_vertex = self.get_home_vertex(occ_graph)
 
         # -- print the graph
-        self.print_occ_graph_dict(occ_graph_dict)
-        print ("-"*100)
+        # self.print_occ_graph_dict(occ_graph_dict)
+        # print ("-"*100)
 
         # -- generate the source_all_nodes
         dist_all_nodes_cur, source_all_nodes_cur = _get_cost_to_all_vertices(
@@ -754,43 +754,43 @@ class PriorityExplorationAgent:
 
         print ("=*"*50)
         # print ("Min Dist Idx Closest Vertex: ", min_dist_idx)
-        print("get_goal_path :: Min Dist Idx from any edge:", closest_edge_point)
-        print("get_goal_path :: Min Dist Idx Edge Source: ", min_dist_source)
-        print("get_goal_path :: Min Dist Idx Edge Target: ", min_dist_target)
-        print("get_goal_path :: Rev path: ", rev_path)
+        print("_convert_graph_path_to_coordinate_path :: Min Dist Idx from any edge:", closest_edge_point)
+        print("_convert_graph_path_to_coordinate_path :: Min Dist Idx Edge Source: ", min_dist_source)
+        print("_convert_graph_path_to_coordinate_path :: Min Dist Idx Edge Target: ", min_dist_target)
+        print("_convert_graph_path_to_coordinate_path :: Rev path: ", rev_path)
         print ("=*"*50)
         # input("Function: _convert_graph_path_to_coordinate_path:: Press any key to continue...")
         # -- check if the first or second node is the closest node from the robot
-        print("get_goal_path :: Current robot position", np.round(self.current_pose.position.x,2), "\t", np.round(self.current_pose.position.y,2))
+        print("_convert_graph_path_to_coordinate_path :: Current robot position", np.round(self.current_pose.position.x,2), "\t", np.round(self.current_pose.position.y,2))
         gpc_init = np.array([[]])
         if len(rev_path) > 1 and min_dist_source == rev_path[1]:
-            print ("get_goal_path :: min_dist_source is the second node")
+            print ("_convert_graph_path_to_coordinate_path :: min_dist_source is the second node")
             # -- get the edge from the closest_edge_point all the way to the source
             gpc_init = self._get_cells_through_edge(closest_edge_point, True, occ_graph.g.links[edge_idx])
             del (rev_path[0])
         elif len(rev_path) > 1 and min_dist_target == rev_path[1]:
-            print ("get_goal_path :: min_dist_target is the second node")
+            print ("_convert_graph_path_to_coordinate_path :: min_dist_target is the second node")
             gpc_init = self._get_cells_through_edge(closest_edge_point, False, occ_graph.g.links[edge_idx])
             del (rev_path[0])
         elif min_dist_source == rev_path[0]:
-            print ("get_goal_path :: min_dist_source is the first node")
+            print ("_convert_graph_path_to_coordinate_path :: min_dist_source is the first node")
             gpc_init = self._get_cells_through_edge(closest_edge_point, True, occ_graph.g.links[edge_idx])
         elif min_dist_target == rev_path[0]:
-            print ("get_goal_path :: min_dist_target is the first node")
+            print ("_convert_graph_path_to_coordinate_path :: min_dist_target is the first node")
             gpc_init = self._get_cells_through_edge(closest_edge_point, False, occ_graph.g.links[edge_idx])
         # -- print gpc init
         if debug_print:
-            print("get_goal_path:: GPC init: ")
+            print("_convert_graph_path_to_coordinate_path:: GPC init: ")
             print(np.round(gpc_init, 2))
 
         # input("Press any key to continue...")
         if debug_print:
             print("rev_path: ", rev_path)
-            print("get_goal_path:: Calling Goal path to coordinates with edges")
+            print("_convert_graph_path_to_coordinate_path:: Calling Goal path to coordinates with edges")
         # gpc: goal_path_corrds
         gpc = self.goal_path_to_coordinates_with_edges(occ_graph_dict, rev_path, True)
         if debug_print:
-            print("get_goal_path:: GPC: ")
+            print("_convert_graph_path_to_coordinate_path:: GPC: ")
             print(np.round(gpc, 2))
 
         gpc = np.array(gpc)
@@ -806,8 +806,10 @@ class PriorityExplorationAgent:
         # -- merge gpc init and gpc to create the final goal path
         if debug_print:
             print("GPC size: ", gpc.shape)
-            # print ("GPC init size: ", gpc_init.shape)
-        gpc = np.vstack((gpc_init, gpc))
+            print ("GPC init size: ", gpc_init.shape)
+        
+        if gpc_init.shape[1] > 0:
+            gpc = np.vstack((gpc_init, gpc))
         if debug_print:
             print("GPC size (after gpc_init): ", gpc.shape)
             # input("Press any key to continue...")
@@ -861,7 +863,7 @@ class PriorityExplorationAgent:
         for v in pts_required:
             odom_coord = self._map_to_odom_coordinate(v)
             coordinates.append(odom_coord)
-        return coordinates
+        return np.array(coordinates)
 
     # --------------------------------------------------------------------------
     # Function: _get_cost_to_all_vertices

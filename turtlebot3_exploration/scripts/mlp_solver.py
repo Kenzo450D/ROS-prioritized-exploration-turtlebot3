@@ -25,7 +25,8 @@ class MLPSolver:
         self.dist_all_nodes_current_vertex = dist_all_nodes_cur
         self.resolution = resolution
         self.avg_speed = avg_speed
-        self.time_offset = 25
+        self.time_offset = 40
+        self.return_home_time_multiplier = 0.9
         # print ("MLP Solver Initialized")
         # print ("Current Vertex: ", self.cur_vertex)
         # print ("Explored Graph: ", self.explored_graph)
@@ -89,7 +90,7 @@ class MLPSolver:
         print ("Time estimate to home: ", time_est_to_home)
         print ("Time remaining: ", self.time_remaining)
         # input("_choose_ml_action_time: Press Enter to continue...")
-        return_home_possible = costs_to_home[self.vertex_map_explored[self.cur_vertex]] + self.time_offset <= self.time_remaining
+        return_home_possible = costs_to_home[self.vertex_map_explored[self.cur_vertex]] * self.return_home_time_multiplier <= self.time_remaining
         # Initialize nodes with the current node.
         states_nodes = [self.cur_vertex]
         states_costs_from_curr = [0.0]
@@ -146,6 +147,8 @@ class MLPSolver:
         # mlp_solver.set_time_limit(1e-3)
         mlp_solver.solve(states_cost_matrix, states_priorities)
         action_idx = mlp_solver.solution()[1]
+        if discovered_vertices[action_idx] == self.cur_vertex: # sending back current vertex makes the robot takes spot turns for a significant cost
+            return 0.0, None
         return discovered_vertex_costs_from_curr[action_idx], discovered_vertices[action_idx]
 
 

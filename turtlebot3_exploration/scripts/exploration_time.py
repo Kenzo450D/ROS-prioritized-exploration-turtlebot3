@@ -56,7 +56,7 @@ class ExplorationTime:
 def main():
     # -- set up parameters
     rospy.set_param('time_before_imposed_deadline', 0)
-    rospy.set_param('time_after_imposed_deadline', 500)
+    rospy.set_param('time_after_imposed_deadline', 1500)
     
     # -- make exploration Time Class object
     wt = ExplorationTime()
